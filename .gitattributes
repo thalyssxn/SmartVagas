@@ -1,0 +1,2 @@
+# LF em tudo. O Prisma confere o checksum das migrations: CRLF no clone quebraria o `migrate`.
+* text=auto eol=lf

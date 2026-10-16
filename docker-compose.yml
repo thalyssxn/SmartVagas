@@ -1,0 +1,22 @@
+# Postgres de desenvolvimento. O app roda fora do Docker (`npm run dev`)
+# até a hospedagem de produção ser decidida (docs/MVP_v1.1.md §7.2).
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: smartvagas
+      POSTGRES_PASSWORD: smartvagas
+      POSTGRES_DB: smartvagas
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U smartvagas -d smartvagas"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:

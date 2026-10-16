@@ -1,0 +1,119 @@
+@import "tailwindcss";
+
+/*
+ * Identidade SmartVagas: sinalização viária brasileira.
+ * Azul de placa para ação, asfalto para a moldura, faixa amarela pintada como único acento forte.
+ * Vermelho = problema, nunca "ocupada" (docs/MVP_v1.1.md §7.3).
+ */
+@theme {
+  --font-sans: "Barlow", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Barlow Condensed", "Barlow", ui-sans-serif, system-ui, sans-serif;
+
+  --color-primaria: #1f4fd6;
+  --color-primaria-escura: #183fae;
+  --color-primaria-clara: #e8eefc;
+  --color-placa: #003399;
+
+  --color-asfalto: #1b222d;
+  --color-asfalto-2: #252e3b;
+  --color-asfalto-3: #343f4f;
+  --color-faixa: #f2c230;
+  --color-faixa-escura: #b8890b;
+  --color-concreto: #eef0ec;
+  --color-tinta: #121821;
+
+  --color-livre: #15803d;
+  --color-ocupada: #334155;
+  --color-reservada: #f2b51d;
+  --color-reservada-texto: #3d2a00;
+  --color-bloqueada: #e2e8f0;
+  --color-bloqueada-texto: #475569;
+  --color-alerta: #d92d20;
+
+  --radius-superficie: 14px;
+  --radius-controle: 10px;
+
+  --shadow-cartao: 0 1px 0 rgb(18 24 33 / 0.04), 0 1px 3px rgb(18 24 33 / 0.06);
+  --shadow-elevado: 0 2px 4px rgb(18 24 33 / 0.06), 0 18px 36px -12px rgb(18 24 33 / 0.22);
+
+  --animate-entrada: entrada 0.3s cubic-bezier(0.22, 1, 0.36, 1) both;
+  @keyframes entrada {
+    from {
+      opacity: 0;
+      transform: translateY(6px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+}
+
+/* Só tema claro: legibilidade no sol do pátio e no celular na rua. */
+:root {
+  color-scheme: light;
+}
+
+body {
+  background: var(--color-concreto);
+  color: var(--color-tinta);
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: "tnum" 0;
+}
+
+::selection {
+  background: rgb(242 194 48 / 0.45);
+}
+
+:focus-visible {
+  outline: 3px solid var(--color-primaria);
+  outline-offset: 2px;
+}
+
+/* Faixa amarela tracejada, como a pintura do asfalto. */
+.faixa-tracejada {
+  background-image: repeating-linear-gradient(
+    90deg,
+    var(--color-faixa) 0 18px,
+    transparent 18px 30px
+  );
+}
+
+/* Vagas pintadas no chão: usado nas áreas de asfalto (login, página inicial). */
+.linhas-vaga {
+  background-image: repeating-linear-gradient(
+    90deg,
+    transparent 0 5.5rem,
+    rgb(255 255 255 / 0.09) 5.5rem calc(5.5rem + 3px)
+  );
+}
+
+.textura-asfalto {
+  background-color: var(--color-asfalto);
+  background-image:
+    radial-gradient(rgb(255 255 255 / 0.035) 1px, transparent 1px),
+    radial-gradient(rgb(0 0 0 / 0.18) 1px, transparent 1px);
+  background-size:
+    5px 5px,
+    7px 7px;
+  background-position:
+    0 0,
+    2px 3px;
+}
+
+.hachura {
+  background-image: repeating-linear-gradient(
+    -45deg,
+    transparent 0 6px,
+    rgb(148 163 184 / 0.35) 6px 8px
+  );
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

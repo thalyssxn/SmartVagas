@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  verificar:
+    runs-on: ubuntu-latest
+    env:
+      # Valores fictícios: o build valida o env no boot, mas não conecta ao banco.
+      DATABASE_URL: postgresql://ci:ci@localhost:5432/ci
+      BETTER_AUTH_SECRET: segredo-de-ci-com-pelo-menos-32-caracteres
+      BETTER_AUTH_URL: http://localhost:3000
+      APP_TIMEZONE: America/Sao_Paulo
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npm run versao:checar
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build

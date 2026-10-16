@@ -1,0 +1,596 @@
+// Modelo do SmartVagas (docs/MVP_v1.1.md §7 + docs/V2.md). Cada fase entra em migration própria.
+// Convenções: dinheiro em centavos (Int), instantes em timestamptz (UTC), dias civis em date.
+// Índices únicos parciais (RN-13 etc.) ficam em SQL cru na migration inicial.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Papel {
+  dono
+  operador
+  motorista
+}
+
+enum TipoVaga {
+  comum
+  pcd
+  idoso
+  moto
+  eletrica
+  /// Caminhonete, SUV grande ou van: ocupa mais espaço.
+  grande
+}
+
+/// Filtro do motorista: que tipo de vaga o veículo dele usa.
+enum TipoVeiculo {
+  carro
+  moto
+  grande
+}
+
+enum TipoParceiro {
+  loja
+  shopping
+  evento
+  empresa
+  outro
+}
+
+/// Como o convênio abate o valor da saída.
+enum TipoDesconto {
+  percentual
+  minutos
+  valor
+}
+
+enum FormaPagamento {
+  dinheiro
+  pix
+  cartao
+}
+
+enum StatusReserva {
+  pendente
+  confirmada
+  em_uso
+  concluida
+  cancelada
+  expirada
+}
+
+enum CategoriaCusto {
+  folha
+  aluguel
+  energia
+  agua
+  manutencao
+  outros
+}
+
+// ---------- Autenticação (Better Auth; nomes de campo exigidos pela lib) ----------
+
+model User {
+  id               String   @id
+  name             String
+  email            String   @unique
+  emailVerified    Boolean  @default(false)
+  image            String?
+  createdAt        DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt        DateTime @updatedAt @db.Timestamptz(3)
+  papel            Papel    @default(operador)
+  estacionamentoId String?  @map("estacionamento_id") @db.Uuid
+
+  estacionamento    Estacionamento?        @relation(fields: [estacionamentoId], references: [id])
+  sessions          Session[]
+  accounts          Account[]
+  funcionario       Funcionario?
+  motoristas        Motorista[]
+  alertasVaga       AlertaVaga[]
+  notificacoes      Notificacao[]
+  entradas          Estadia[]              @relation("EntradaPor")
+  saidas            Estadia[]              @relation("SaidaPor")
+  turnos            Turno[]
+  custosLancados    Custo[]
+  baixasMensalidade PagamentoMensalidade[]
+  auditLogs         AuditLog[]
+
+  @@map("users")
+}
+
+model Session {
+  id        String   @id
+  expiresAt DateTime @db.Timestamptz(3)
+  token     String   @unique
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+  ipAddress String?
+  userAgent String?
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+model Account {
+  id                    String    @id
+  accountId             String
+  providerId            String
+  userId                String
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accessToken           String?
+  refreshToken          String?
+  idToken               String?
+  accessTokenExpiresAt  DateTime? @db.Timestamptz(3)
+  refreshTokenExpiresAt DateTime? @db.Timestamptz(3)
+  scope                 String?
+  password              String?
+  createdAt             DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt             DateTime  @updatedAt @db.Timestamptz(3)
+
+  @@index([userId])
+  @@map("accounts")
+}
+
+model Verification {
+  id         String   @id
+  identifier String
+  value      String
+  expiresAt  DateTime @db.Timestamptz(3)
+  createdAt  DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt  DateTime @updatedAt @db.Timestamptz(3)
+
+  @@index([identifier])
+  @@map("verifications")
+}
+
+/// Rate-limit do login no banco: em memória não vale entre instâncias serverless.
+model RateLimit {
+  id          String @id
+  key         String @unique
+  count       Int
+  lastRequest BigInt
+
+  @@map("rate_limits")
+}
+
+// ---------- Estacionamento ----------
+
+model Estacionamento {
+  id       String   @id @default(uuid()) @db.Uuid
+  nome     String
+  endereco String
+  horario  String?
+  /// V2: aparece para o motorista na busca por cidade e distância.
+  cidade    String?
+  telefone  String?
+  descricao String?
+  latitude  Float?
+  longitude Float?
+  /// Desligado, o estacionamento some da busca pública (o pátio segue funcionando).
+  publicado Boolean  @default(true)
+  criadoEm DateTime @default(now()) @map("criado_em") @db.Timestamptz(3)
+
+  configuracao Configuracao?
+  usuarios     User[]
+  setores      Setor[]
+  vagas        Vaga[]
+  estadias     Estadia[]
+  planos       Plano[]
+  motoristas   Motorista[]
+  pagamentos   PagamentoMensalidade[]
+  reservas     Reserva[]
+  funcionarios Funcionario[]
+  custos       Custo[]
+  turnos       Turno[]
+  auditLogs    AuditLog[]
+  eventos      Evento[]
+  convenios    Convenio[]
+  alertasVaga  AlertaVaga[]
+
+  @@map("estacionamentos")
+}
+
+/// RF-03: tudo que o dono edita sem redeploy.
+model Configuracao {
+  estacionamentoId        String   @id @map("estacionamento_id") @db.Uuid
+  toleranciaMin           Int      @default(15) @map("tolerancia_min")
+  primeiraHoraCentavos    Int      @map("primeira_hora_centavos")
+  horaAdicionalCentavos   Int      @map("hora_adicional_centavos")
+  diariaCentavos          Int      @map("diaria_centavos")
+  alertaPermanenciaH      Int      @default(12) @map("alerta_permanencia_h")
+  carenciaMensalidadeDias Int      @default(5) @map("carencia_mensalidade_dias")
+  // Reservas (Fase 2). Tudo editável pelo dono, como o resto.
+  antecedenciaMinMin      Int      @default(60) @map("antecedencia_min_min")
+  antecedenciaMaxDias     Int      @default(7) @map("antecedencia_max_dias")
+  duracaoMaxH             Int      @default(12) @map("duracao_max_h")
+  expiracaoPendenteMin    Int      @default(15) @map("expiracao_pendente_min")
+  cancelamentoPrazoH      Int      @default(2) @map("cancelamento_prazo_h")
+  /// % retido do valor pago quando o cancelamento é fora do prazo.
+  retencaoPct             Int      @default(100) @map("retencao_pct")
+  /// RN-10: avulso não ocupa vaga com reserva começando dentro desta janela.
+  bloqueioAvulsoH         Int      @default(3) @map("bloqueio_avulso_h")
+  chegadaAntecipadaMin    Int      @default(30) @map("chegada_antecipada_min")
+  /// Provisório até o gateway Pix (V2): exibida ao motorista para pagar a reserva.
+  chavePix                String?  @map("chave_pix")
+  atualizadoEm            DateTime @updatedAt @map("atualizado_em") @db.Timestamptz(3)
+
+  estacionamento Estacionamento @relation(fields: [estacionamentoId], references: [id], onDelete: Cascade)
+
+  @@map("configuracoes")
+}
+
+model Setor {
+  id               String @id @default(uuid()) @db.Uuid
+  estacionamentoId String @map("estacionamento_id") @db.Uuid
+  nome             String
+
+  estacionamento Estacionamento @relation(fields: [estacionamentoId], references: [id], onDelete: Cascade)
+  vagas          Vaga[]
+
+  @@unique([estacionamentoId, nome])
+  @@map("setores")
+}
+
+model Vaga {
+  id               String   @id @default(uuid()) @db.Uuid
+  estacionamentoId String   @map("estacionamento_id") @db.Uuid
+  setorId          String?  @map("setor_id") @db.Uuid
+  numero           String
+  tipo             TipoVaga @default(comum)
+  coberta          Boolean  @default(false)
+  ativa            Boolean  @default(true)
+  motivoBloqueio   String?  @map("motivo_bloqueio")
+  /// RN-07: só vaga ativa e reservável aparece para o motorista (Fase 2).
+  reservavel       Boolean  @default(false)
+
+  estacionamento   Estacionamento @relation(fields: [estacionamentoId], references: [id], onDelete: Cascade)
+  setor            Setor?         @relation(fields: [setorId], references: [id], onDelete: SetNull)
+  estadias         Estadia[]
+  assinaturasFixas Assinatura[]
+  reservas         Reserva[]
+
+  @@unique([estacionamentoId, numero])
+  @@map("vagas")
+}
+
+model Estadia {
+  id               String          @id @default(uuid()) @db.Uuid
+  estacionamentoId String          @map("estacionamento_id") @db.Uuid
+  vagaId           String          @map("vaga_id") @db.Uuid
+  placa            String
+  modelo           String?
+  entradaEm        DateTime        @map("entrada_em") @db.Timestamptz(3)
+  saidaEm          DateTime?       @map("saida_em") @db.Timestamptz(3)
+  valorCentavos    Int?            @map("valor_centavos")
+  formaPagamento   FormaPagamento? @map("forma_pagamento")
+  /// Plano do mensalista aplicado no cálculo (RN-05); fixado na entrada.
+  assinaturaId     String?         @map("assinatura_id") @db.Uuid
+  /// Turno de caixa que recebeu o pagamento (RF-07d).
+  turnoId          String?         @map("turno_id") @db.Uuid
+  /// V2: convênio aplicado na saída e quanto ele abateu (o parceiro paga essa diferença).
+  convenioId       String?         @map("convenio_id") @db.Uuid
+  descontoCentavos Int             @default(0) @map("desconto_centavos")
+  /// RF-04c: horário digitado depois (internet caiu), não o do relógio.
+  retroativa       Boolean         @default(false)
+  entradaPorId     String          @map("entrada_por_id")
+  saidaPorId       String?         @map("saida_por_id")
+
+  estacionamento Estacionamento @relation(fields: [estacionamentoId], references: [id], onDelete: Cascade)
+  vaga           Vaga           @relation(fields: [vagaId], references: [id])
+  assinatura     Assinatura?    @relation(fields: [assinaturaId], references: [id], onDelete: SetNull)
+  turno          Turno?         @relation(fields: [turnoId], references: [id], onDelete: SetNull)
+  convenio       Convenio?      @relation(fields: [convenioId], references: [id], onDelete: SetNull)
+  reserva        Reserva?
+  entradaPor     User           @relation("EntradaPor", fields: [entradaPorId], references: [id])
+  saidaPor       User?          @relation("SaidaPor", fields: [saidaPorId], references: [id])
+
+  @@index([estacionamentoId, saidaEm])
+  @@index([estacionamentoId, placa])
+  @@map("estadias")
+}
+
+// ---------- Mensalistas ----------
+
+model Plano {
+  id               String  @id @default(uuid()) @db.Uuid
+  estacionamentoId String  @map("estacionamento_id") @db.Uuid
+  nome             String
+  valorCentavos    Int     @map("valor_centavos")
+  /// 0 = domingo … 6 = sábado; dia em que a janela começa.
+  diasSemana       Int[]   @map("dias_semana")
+  /// Minutos desde 00:00. Ambos nulos = dia inteiro. fim <= início atravessa a meia-noite.
+  inicioMin        Int?    @map("inicio_min")
+  fimMin           Int?    @map("fim_min")
+  ativo            Boolean @default(true)
+
+  estacionamento Estacionamento @relation(fields: [estacionamentoId], references: [id], onDelete: Cascade)
+  assinaturas    Assinatura[]
+
+  @@unique([estacionamentoId, nome])
+  @@map("planos")
+}
+
+/// Cliente de um estacionamento: mensalista cadastrado pelo dono ou motorista do portal.
+/// V2: um login pode ser cliente de vários estacionamentos (uma linha por estacionamento).
+model Motorista {
+  id               String   @id @default(uuid()) @db.Uuid
+  estacionamentoId String   @map("estacionamento_id") @db.Uuid
+  nome             String
+  telefone         String?
+  email            String?
+  userId           String?  @map("user_id")
+  criadoEm         DateTime @default(now()) @map("criado_em") @db.Timestamptz(3)
+
+  estacionamento Estacionamento @relation(fields: [estacionamentoId], references: [id], onDelete: Cascade)
+  user           User?          @relation(fields: [userId], references: [id], onDelete: SetNull)
+  veiculos       Veiculo[]
+  assinaturas    Assinatura[]
+  reservas       Reserva[]
+
+  @@unique([estacionamentoId, userId])
+  @@map("motoristas")
+}
+
+model Veiculo {
+  id          String  @id @default(uuid()) @db.Uuid
+  motoristaId String  @map("motorista_id") @db.Uuid
+  placa       String
+  modelo      String?
+  tipo        TipoVeiculo @default(carro)
+
+  motorista Motorista @relation(fields: [motoristaId], references: [id], onDelete: Cascade)
+
+  @@unique([motoristaId, placa])
+  @@index([placa])
+  @@map("veiculos")
+}
+
+model Assinatura {
+  id          String    @id @default(uuid()) @db.Uuid
+  motoristaId String    @map("motorista_id") @db.Uuid
+  planoId     String    @map("plano_id") @db.Uuid
+  vagaFixaId  String?   @map("vaga_fixa_id") @db.Uuid
+  /// Pago até este dia, inclusive (RN-06). Status é calculado na leitura.
+  venceEm     DateTime  @map("vence_em") @db.Date
+  criadaEm    DateTime  @default(now()) @map("criada_em") @db.Timestamptz(3)
+  encerradaEm DateTime? @map("encerrada_em") @db.Timestamptz(3)
+
+  motorista  Motorista              @relation(fields: [motoristaId], references: [id], onDelete: Cascade)
+  plano      Plano                  @relation(fields: [planoId], references: [id])
+  vagaFixa   Vaga?                  @relation(fields: [vagaFixaId], references: [id], onDelete: SetNull)
+  pagamentos PagamentoMensalidade[]
+  estadias   Estadia[]
+
+  @@index([motoristaId])
+  @@map("assinaturas")
+}
+
+model PagamentoMensalidade {
+  id               String         @id @default(uuid()) @db.Uuid
+  estacionamentoId String         @map("estacionamento_id") @db.Uuid
+  assinaturaId     String         @map("assinatura_id") @db.Uuid
+  valorCentavos    Int            @map("valor_centavos")
+  formaPagamento   FormaPagamento @map("forma_pagamento")
+  pagoEm           DateTime       @default(now()) @map("pago_em") @db.Timestamptz(3)
+  /// Novo vencimento gerado por esta baixa.
+  periodoAte       DateTime       @map("periodo_ate") @db.Date
+  turnoId          String?        @map("turno_id") @db.Uuid
+  registradoPorId  String         @map("registrado_por_id")
+
+  estacionamento Estacionamento @relation(fields: [estacionamentoId], references: [id], onDelete: Cascade)
+  assinatura     Assinatura     @relation(fields: [assinaturaId], references: [id], onDelete: Cascade)
+  turno          Turno?         @relation(fields: [turnoId], references: [id], onDelete: SetNull)
+  registradoPor  User           @relation(fields: [registradoPorId], references: [id])
+
+  @@index([estacionamentoId, pagoEm])
+  @@map("pagamentos_mensalidade")
+}
+
+// ---------- Equipe, custos e caixa ----------
+
+model Funcionario {
+  id               String  @id @default(uuid()) @db.Uuid
+  estacionamentoId String  @map("estacionamento_id") @db.Uuid
+  nome             String
+  funcao           String
+  salarioCentavos  Int     @map("salario_centavos")
+  /// FGTS, INSS patronal, férias e 13º provisionados: sem isso o lucro fica inflado.
+  encargosCentavos Int     @default(0) @map("encargos_centavos")
+  ativo            Boolean @default(true)
+  /// Nem todo funcionário faz login no sistema.
+  userId           String? @unique @map("user_id")
+
+  estacionamento Estacionamento @relation(fields: [estacionamentoId], references: [id], onDelete: Cascade)
+  user           User?          @relation(fields: [userId], references: [id], onDelete: SetNull)
+  custos         Custo[]
+
+  @@map("funcionarios")
+}
+
+model Custo {
+  id               String         @id @default(uuid()) @db.Uuid
+  estacionamentoId String         @map("estacionamento_id") @db.Uuid
+  categoria        CategoriaCusto
+  descricao        String
+  valorCentavos    Int            @map("valor_centavos")
+  data             DateTime       @db.Date
+  /// Folha: snapshot por funcionário e competência ("2026-10"), para não lançar duas vezes.
+  funcionarioId    String?        @map("funcionario_id") @db.Uuid
+  competencia      String?
+  criadoPorId      String         @map("criado_por_id")
+  criadoEm         DateTime       @default(now()) @map("criado_em") @db.Timestamptz(3)
+
+  estacionamento Estacionamento @relation(fields: [estacionamentoId], references: [id], onDelete: Cascade)
+  funcionario    Funcionario?   @relation(fields: [funcionarioId], references: [id], onDelete: SetNull)
+  criadoPor      User           @relation(fields: [criadoPorId], references: [id])
+
+  @@unique([funcionarioId, competencia])
+  @@index([estacionamentoId, data])
+  @@map("custos")
+}
+
+/// RF-07d: caixa por turno. Esperado = troco + recebimentos em dinheiro no turno.
+model Turno {
+  id                   String    @id @default(uuid()) @db.Uuid
+  estacionamentoId     String    @map("estacionamento_id") @db.Uuid
+  operadorId           String    @map("operador_id")
+  abertoEm             DateTime  @default(now()) @map("aberto_em") @db.Timestamptz(3)
+  trocoInicialCentavos Int       @map("troco_inicial_centavos")
+  fechadoEm            DateTime? @map("fechado_em") @db.Timestamptz(3)
+  contadoCentavos      Int?      @map("contado_centavos")
+  esperadoCentavos     Int?      @map("esperado_centavos")
+  observacao           String?
+
+  estacionamento Estacionamento         @relation(fields: [estacionamentoId], references: [id], onDelete: Cascade)
+  operador       User                   @relation(fields: [operadorId], references: [id])
+  estadias       Estadia[]
+  pagamentos     PagamentoMensalidade[]
+
+  @@map("turnos")
+}
+
+model AuditLog {
+  id               String   @id @default(uuid()) @db.Uuid
+  estacionamentoId String   @map("estacionamento_id") @db.Uuid
+  userId           String   @map("user_id")
+  /// Ex.: "estadia.entrada", "estadia.saida", "config.precos".
+  acao             String
+  entidade         String
+  entidadeId       String?  @map("entidade_id")
+  dados            Json?
+  criadoEm         DateTime @default(now()) @map("criado_em") @db.Timestamptz(3)
+
+  estacionamento Estacionamento @relation(fields: [estacionamentoId], references: [id], onDelete: Cascade)
+  user           User           @relation(fields: [userId], references: [id])
+
+  @@index([estacionamentoId, criadoEm])
+  @@map("audit_logs")
+}
+
+/// Fase 2. Sobreposição na mesma vaga é barrada na transação (lock na vaga), não por constraint:
+/// o Postgres embutido do `prisma dev` não traz btree_gist.
+model Reserva {
+  id                String        @id @default(uuid()) @db.Uuid
+  estacionamentoId  String        @map("estacionamento_id") @db.Uuid
+  vagaId            String        @map("vaga_id") @db.Uuid
+  motoristaId       String        @map("motorista_id") @db.Uuid
+  placa             String
+  /// Código curto: fallback na entrada se vier outro carro.
+  codigo            String
+  inicioEm          DateTime      @map("inicio_em") @db.Timestamptz(3)
+  fimEm             DateTime      @map("fim_em") @db.Timestamptz(3)
+  valorCentavos     Int           @map("valor_centavos")
+  status            StatusReserva @default(pendente)
+  /// Pendente que passar daqui vira expirada (calculado na leitura, sem cron).
+  expiraEm          DateTime      @map("expira_em") @db.Timestamptz(3)
+  criadaEm          DateTime      @default(now()) @map("criada_em") @db.Timestamptz(3)
+  pagaEm            DateTime?     @map("paga_em") @db.Timestamptz(3)
+  confirmadaPorId   String?       @map("confirmada_por_id")
+  canceladaEm       DateTime?     @map("cancelada_em") @db.Timestamptz(3)
+  /// Quanto devolver ao motorista no cancelamento (0 = nada). O reembolso é manual (RN-02).
+  reembolsoCentavos Int           @default(0) @map("reembolso_centavos")
+  reembolsadaEm     DateTime?     @map("reembolsada_em") @db.Timestamptz(3)
+  estadiaId         String?       @unique @map("estadia_id") @db.Uuid
+  /// V2: reserva feita a partir da página de um evento.
+  eventoId          String?       @map("evento_id") @db.Uuid
+
+  estacionamento Estacionamento @relation(fields: [estacionamentoId], references: [id], onDelete: Cascade)
+  vaga           Vaga           @relation(fields: [vagaId], references: [id])
+  motorista      Motorista      @relation(fields: [motoristaId], references: [id], onDelete: Cascade)
+  estadia        Estadia?       @relation(fields: [estadiaId], references: [id], onDelete: SetNull)
+  evento         Evento?        @relation(fields: [eventoId], references: [id], onDelete: SetNull)
+
+  @@unique([estacionamentoId, codigo])
+  @@index([vagaId, inicioEm])
+  @@index([motoristaId, status])
+  @@index([estacionamentoId, status, inicioEm])
+  @@map("reservas")
+}
+
+// ---------- V2: eventos, convênios e avisos ----------
+
+/// Evento da cidade em que o estacionamento atende (show, jogo, feira...). Aparece para o motorista.
+model Evento {
+  id               String   @id @default(uuid()) @db.Uuid
+  estacionamentoId String   @map("estacionamento_id") @db.Uuid
+  nome             String
+  descricao        String?
+  /// Onde acontece (arena, ginásio, praça...).
+  local            String
+  categoria        String?
+  inicioEm         DateTime @map("inicio_em") @db.Timestamptz(3)
+  fimEm            DateTime @map("fim_em") @db.Timestamptz(3)
+  ativo            Boolean  @default(true)
+  criadoEm         DateTime @default(now()) @map("criado_em") @db.Timestamptz(3)
+
+  estacionamento Estacionamento @relation(fields: [estacionamentoId], references: [id], onDelete: Cascade)
+  reservas       Reserva[]
+
+  @@index([estacionamentoId, inicioEm])
+  @@index([inicioEm])
+  @@map("eventos")
+}
+
+/// Parceria com loja, shopping, evento ou empresa: o cliente ganha desconto na saída
+/// e o estacionamento cobra a diferença do parceiro no fim do mês.
+model Convenio {
+  id               String       @id @default(uuid()) @db.Uuid
+  estacionamentoId String       @map("estacionamento_id") @db.Uuid
+  nome             String
+  tipo             TipoParceiro
+  contato          String?
+  telefone         String?
+  tipoDesconto     TipoDesconto @map("tipo_desconto")
+  /// percentual: 1-100 · minutos: minutos grátis · valor: centavos abatidos.
+  valorDesconto    Int          @map("valor_desconto")
+  validoAte        DateTime?    @map("valido_ate") @db.Date
+  ativo            Boolean      @default(true)
+  observacao       String?
+  criadoEm         DateTime     @default(now()) @map("criado_em") @db.Timestamptz(3)
+
+  estacionamento Estacionamento @relation(fields: [estacionamentoId], references: [id], onDelete: Cascade)
+  estadias       Estadia[]
+
+  @@unique([estacionamentoId, nome])
+  @@map("convenios")
+}
+
+/// "Avise-me quando abrir vaga": criado quando o estacionamento está lotado.
+model AlertaVaga {
+  id               String    @id @default(uuid()) @db.Uuid
+  userId           String    @map("user_id")
+  estacionamentoId String    @map("estacionamento_id") @db.Uuid
+  criadoEm         DateTime  @default(now()) @map("criado_em") @db.Timestamptz(3)
+  notificadoEm     DateTime? @map("notificado_em") @db.Timestamptz(3)
+
+  user           User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  estacionamento Estacionamento @relation(fields: [estacionamentoId], references: [id], onDelete: Cascade)
+
+  @@index([estacionamentoId, notificadoEm])
+  @@index([userId])
+  @@map("alertas_vaga")
+}
+
+/// Central de avisos do motorista (vaga liberada, reserva confirmada, tempo acabando...).
+model Notificacao {
+  id       String    @id @default(uuid()) @db.Uuid
+  userId   String    @map("user_id")
+  tipo     String
+  titulo   String
+  mensagem String
+  link     String?
+  lidaEm   DateTime? @map("lida_em") @db.Timestamptz(3)
+  criadaEm DateTime  @default(now()) @map("criada_em") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, lidaEm])
+  @@map("notificacoes")
+}
