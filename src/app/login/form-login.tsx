@@ -8,12 +8,16 @@ import { Input, Label } from "@/components/ui/input";
 import { authClient } from "@/lib/auth-client";
 
 const MUITAS_TENTATIVAS = 429;
-const CREDENCIAIS_INVALIDAS = [400, 401, 403];
+const CREDENCIAIS_INVALIDAS = [400, 401];
+const ORIGEM_RECUSADA = 403;
 
 // Só diz "senha incorreta" quando é isso mesmo: banco fora do ar não pode parecer senha errada.
 function mensagemDeErro(status: number): string {
   if (status === MUITAS_TENTATIVAS) return "Muitas tentativas. Aguarde um minuto.";
   if (CREDENCIAIS_INVALIDAS.includes(status)) return "E-mail ou senha incorretos.";
+  if (status === ORIGEM_RECUSADA) {
+    return "O servidor recusou o login vindo deste endereço. Confira se BETTER_AUTH_URL é igual ao endereço do site.";
+  }
   return "Não foi possível entrar agora: o servidor ou o banco de dados não respondeu. Tente de novo em instantes.";
 }
 
